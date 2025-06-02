@@ -1285,10 +1285,6 @@ impl CoreBluetoothInternal {
 
         for peripheral in peripherals {
             let uuid = nsuuid_to_uuid(unsafe { &peripheral.identifier() });
-            if self.peripherals.contains_key(&uuid) {
-                trace!("Peripheral {} already exists, skipping.", uuid);
-                continue;
-            }
             trace!("Discovered connected peripheral: {}", uuid);
             let (event_sender, event_receiver) = mpsc::channel(256);
             let name: Option<String> = unsafe {
@@ -1297,10 +1293,12 @@ impl CoreBluetoothInternal {
                     None => None,
                 }
             };
-            self.peripherals.insert(
-                uuid,
-                PeripheralInternal::new(Retained::from(peripheral), event_sender),
-            );
+            if !self.peripherals.contains_key(&uuid) {
+                self.peripherals.insert(
+                    uuid,
+                    PeripheralInternal::new(Retained::from(peripheral), event_sender),
+                );
+            }
             let discovered_device = CoreBluetoothEvent::DeviceDiscovered {
                 uuid,
                 name,

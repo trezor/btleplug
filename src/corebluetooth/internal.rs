@@ -31,7 +31,7 @@ use objc2_core_bluetooth::{
     CBCharacteristicProperties, CBCharacteristicWriteType, CBDescriptor, CBManager,
     CBManagerAuthorization, CBManagerState, CBPeripheral, CBPeripheralState, CBService, CBUUID,
 };
-use objc2_foundation::{NSArray, NSData, NSMutableDictionary, NSNumber};
+use objc2_foundation::{NSArray, NSData, NSMutableDictionary, NSNumber, NSProcessInfo};
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
     ffi::CString,
@@ -369,6 +369,7 @@ impl PeripheralInternal {
 struct CoreBluetoothInternal {
     manager: Retained<CBCentralManager>,
     delegate: Retained<CentralDelegate>,
+    can_send_without_response_supported: bool,
     // Map of identifiers to object pointers
     peripherals: HashMap<Uuid, PeripheralInternal>,
     delegate_receiver: Fuse<Receiver<CentralDelegateEvent>>,
@@ -492,8 +493,16 @@ impl CoreBluetoothInternal {
             msg_send_id![CBCentralManager::alloc(), initWithDelegate: &*delegate, queue: queue]
         };
 
+        let process_info = unsafe { NSProcessInfo::processInfo() };
+        let version = unsafe { process_info.operatingSystemVersion() };
+        let mut can_send_without_response_supported = false;
+        if (version.majorVersion, version.minorVersion) >= (11, 2) {
+            can_send_without_response_supported = true;
+        }
+
         Self {
             manager,
+            can_send_without_response_supported,
             peripherals: HashMap::new(),
             delegate_receiver: receiver.fuse(),
             event_sender,
@@ -888,7 +897,9 @@ impl CoreBluetoothInternal {
                 {
                     trace!("Writing value! With kind {:?}", kind);
                     unsafe {
-                        if kind == WriteType::WithoutResponse {
+                        if kind == WriteType::WithoutResponse
+                            && self.can_send_without_response_supported
+                        {
                             // probably better idea would be to wait for the result of peripheral.peripheralIsReadyToSendWriteWithoutResponse
                             let mut attempts = 0;
                             while !peripheral.peripheral.canSendWriteWithoutResponse()

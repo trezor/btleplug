@@ -84,6 +84,7 @@ impl Peripheral {
     pub(crate) fn new(
         uuid: Uuid,
         local_name: Option<String>,
+        advertisement_name: Option<String>,
         manager: Weak<AdapterManager<Self>>,
         event_receiver: Receiver<PeripheralEventInternal>,
         message_sender: Sender<CoreBluetoothMessage>,
@@ -94,6 +95,7 @@ impl Peripheral {
             address: BDAddr::default(),
             address_type: None,
             local_name,
+            advertisement_name,
             tx_power_level: None,
             rssi: None,
             manufacturer_data: HashMap::new(),
@@ -171,8 +173,15 @@ impl Peripheral {
         Self { shared: shared }
     }
 
-    pub(super) fn update_name(&self, name: &str) {
-        self.shared.properties.lock().unwrap().local_name = Some(name.to_string());
+    pub(super) fn update_name(
+        &self,
+        local_name: Option<String>,
+        advertisement_name: Option<String>,
+    ) {
+        if let Ok(mut guard) = self.shared.properties.lock() {
+            guard.local_name = local_name;
+            guard.advertisement_name = advertisement_name;
+        }
     }
 }
 

@@ -585,9 +585,9 @@ impl CoreBluetoothInternal {
         let peripheral_name = unsafe { peripheral.name() };
 
         let name = match (peripheral_name.map(|n| n.to_string()), local_name) {
-            (Some(p_name), Some(l_name)) if p_name != l_name => {
-                Some(format!("{p_name} [{l_name}]"))
-            }
+            // (Some(p_name), Some(l_name)) if p_name != l_name => {
+            //     Some(format!("{p_name} [{l_name}]"))
+            // }
             (Some(p_name), Some(_)) => Some(p_name),
             (Some(p_name), None) => Some(p_name),
             (None, Some(l_name)) => Some(l_name),

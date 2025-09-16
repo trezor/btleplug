@@ -154,6 +154,10 @@ impl Central for Adapter {
         Ok(())
     }
 
+    async fn connected_peripherals(&self, filter: ScanFilter) -> Result<()> {
+        Ok(())
+    }
+
     async fn peripherals(&self) -> Result<Vec<Peripheral>> {
         Ok(self.manager.peripherals())
     }

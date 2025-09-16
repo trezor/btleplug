@@ -83,6 +83,10 @@ impl Central for Adapter {
         Ok(())
     }
 
+    async fn connected_peripherals(&self, filter: ScanFilter) -> Result<()> {
+        Ok(())
+    }
+
     async fn peripherals(&self) -> Result<Vec<Peripheral>> {
         let devices = self.session.get_devices_on_adapter(&self.adapter).await?;
         Ok(devices

@@ -1254,6 +1254,16 @@ impl CoreBluetoothInternal {
                 NSNumber::new_bool(true),
             ))),
         );
+
+        let connected = unsafe {
+            self.manager.retrieveConnectedPeripheralsWithServices(service_uuids)
+        };
+        for i in 0..ns::array_count(connected) {
+            let p = ns::array_objectatindex(connected, i);
+            let peripheral = unsafe { StrongPtr::retain(p) };
+            self.on_discovered_peripheral(peripheral).await;
+        }
+
         unsafe {
             self.manager
                 .scanForPeripheralsWithServices_options(service_uuids.as_deref(), Some(&options))

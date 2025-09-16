@@ -28,6 +28,7 @@ use objc2_core_bluetooth::{
     CBAdvertisementDataServiceDataKey, CBAdvertisementDataServiceUUIDsKey, CBCentralManager,
     CBCentralManagerDelegate, CBCharacteristic, CBDescriptor, CBManagerState, CBPeripheral,
     CBPeripheralDelegate, CBService, CBUUID,
+    CBCentralManagerRestoredStatePeripheralsKey
 };
 use objc2_foundation::{
     NSArray, NSData, NSDictionary, NSError, NSNumber, NSObject, NSObjectProtocol, NSString,
@@ -319,10 +320,29 @@ declare_class!(
             self.send_event(CentralDelegateEvent::DidUpdateState { state });
         }
 
-        // #[method(centralManager:willRestoreState:)]
-        // fn delegate_centralmanager_willrestorestate(&self, _central: &CBCentralManager, _dict: &NSDictionary<NSString, AnyObject>) {
-        //     trace!("delegate_centralmanager_willrestorestate");
-        // }
+        #[method(centralManager:willRestoreState:)]
+        fn delegate_centralmanager_willrestorestate(&self, _central: &CBCentralManager, dict: &NSDictionary<NSString, AnyObject>) {
+            trace!("-----> delegate_centralmanager_willrestorestate");
+            // SAFETY: extern NSString* constants from CoreBluetooth
+            // let key: &NSString = unsafe { &*CBCentralManagerRestoredStatePeripheralsKey };
+            // // Look up restored peripherals
+            // if let Some(objs) = dict.get(key) {
+
+            //     // trace!("-----> delegate_centralmanager_willrestorestate {}", objs);
+
+            //     // Cast to NSArray<CBPeripheral>
+            //     //   if let Some(peripherals) = objs.downcast_ref::<objc2_foundation::NSArray<CBPeripheral>>() {
+            //     //     let count = peripherals.len();
+            //     //     trace!("Restored {} peripheral(s).", count);
+
+            //     //     for peripheral in peripherals {
+            //     //         // ⚡ Here you would re-set the delegate
+            //     //         // e.g. peripheral.setDelegate(Some(self));
+            //     //         trace!("Restored peripheral: {:?}", peripheral);
+            //     //     }
+            //     // }
+            // }
+        }
 
         #[method(centralManager:didConnectPeripheral:)]
         fn delegate_centralmanager_didconnectperipheral(
@@ -492,6 +512,16 @@ declare_class!(
                     services: service_map,
                 });
             }
+        }
+
+        #[method(peripheralDidUpdateName:)]
+        fn delegate_peripheral_did_update_name(&self, peripheral: &CBPeripheral) {
+            trace!("delegate_peripheral_didupdatename {}", peripheral_debug(peripheral));
+        }
+
+        #[method(peripheralIsReadyToSendWriteWithoutResponse:)]
+        fn delegate_peripheral_is_ready_to_send_write_without_response(&self, peripheral: &CBPeripheral) {
+            trace!("delegate_peripheral_is_ready_to_send_write_without_response {:?}", peripheral_debug(peripheral));
         }
 
         #[method(peripheral:didDiscoverIncludedServicesForService:error:)]

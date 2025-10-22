@@ -3,7 +3,10 @@ use super::internal::{
     CoreBluetoothReplyFuture,
 };
 use super::peripheral::{Peripheral, PeripheralId};
-use crate::api::{Central, CentralEvent, CentralState, ScanFilter};
+use crate::api::{
+    Central, CentralEvent, CentralState, Peripheral as _, RetrievePeripheralsOptions,
+    RetrievedPeripheral, ScanFilter,
+};
 use crate::common::adapter_manager::AdapterManager;
 use crate::{Error, Result};
 use async_trait::async_trait;
@@ -126,6 +129,82 @@ impl Central for Adapter {
 
     async fn peripherals(&self) -> Result<Vec<Peripheral>> {
         Ok(self.manager.peripherals())
+    }
+
+    async fn retrieve_peripherals(
+        &self,
+        options: RetrievePeripheralsOptions,
+    ) -> Result<Vec<RetrievedPeripheral>> {
+        let mut result: Vec<RetrievedPeripheral> = vec![];
+
+        if let Some(identifiers) = options.identifiers {
+            /// check if peripheral was already discovered
+            let mut discovered: Vec<PeripheralId> = vec![];
+            for id in &identifiers {
+                let per = self.manager.peripheral(id);
+                log::debug!("CoreBluetoothReply::DiscoveredPeripherals {:?}", id);
+                if let Some(perr) = self.manager.peripheral(id) {
+                    let is_connected = perr.is_connected().await.unwrap_or(false);
+                    let properties = perr.properties().await.unwrap_or(None);
+                    result.push(RetrievedPeripheral {
+                        id: id.clone(),
+                        is_connected,
+                        is_discovered: true,
+                        properties,
+                    });
+                    discovered.push(id.clone());
+                }
+            }
+
+            let identifiers = identifiers
+                .into_iter()
+                .filter(|id| !discovered.contains(id));
+
+            let fut = CoreBluetoothReplyFuture::default();
+            self.sender
+                .to_owned()
+                .send(CoreBluetoothMessage::RetrievePeripherals {
+                    identifiers: identifiers.into_iter().map(|a| a.into()).collect(),
+                    future: fut.get_state_clone(),
+                })
+                .await?;
+
+            match fut.await {
+                CoreBluetoothReply::Peripherals(uuids) => {
+                    log::debug!("CoreBluetoothReply::Peripherals {:?}", uuids);
+
+                    for a in uuids {
+                        log::debug!("CoreBluetoothReply:properties:Peripherals2 {:?}", a);
+                        // let (event_sender, event_receiver) = mpsc::channel(256);
+                        // let p = Peripheral::new(
+                        //     a.uuid,
+                        //     a.local_name,
+                        //     None,
+                        //     Arc::downgrade(&self.manager),
+                        //     event_receiver,
+                        //     self.sender.clone(),
+                        // );
+
+                        // let is_connected = p.is_connected().await.unwrap_or(false);
+                        // result.push(p);
+                        result.push(RetrievedPeripheral {
+                            id: PeripheralId::from(a.uuid),
+                            is_connected: false,
+                            is_discovered: false,
+                            properties: None,
+                            // properties: PeripheralProperties {
+                            //     local_name: a.local_name,
+                            // },
+                        });
+                    }
+                }
+                _ => trace!("Shouldn't get anything but Peripherals"),
+            };
+        }
+
+        if let Some(services) = options.services {}
+
+        Ok(result)
     }
 
     async fn peripheral(&self, id: &PeripheralId) -> Result<Peripheral> {

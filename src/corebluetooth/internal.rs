@@ -509,7 +509,6 @@ impl CoreBluetoothInternal {
             msg_send_id![CBCentralManager::alloc(), initWithDelegate: &*delegate, queue: queue]
         };
 
-
         Self {
             manager,
             peripherals: HashMap::new(),

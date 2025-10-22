@@ -1,5 +1,8 @@
 use super::peripheral::{Peripheral, PeripheralId};
-use crate::api::{Central, CentralEvent, CentralState, ScanFilter};
+use crate::api::{
+    Central, CentralEvent, CentralState, Peripheral as _, RetrievePeripheralsOptions,
+    RetrievedPeripheral, ScanFilter,
+};
 use crate::{Error, Result};
 use async_trait::async_trait;
 use bluez_async::{
@@ -89,6 +92,33 @@ impl Central for Adapter {
             .into_iter()
             .map(|device| Peripheral::new(self.session.clone(), device))
             .collect())
+    }
+
+    async fn retrieve_peripherals(
+        &self,
+        options: RetrievePeripheralsOptions,
+    ) -> Result<Vec<RetrievedPeripheral>> {
+        let mut result: Vec<RetrievedPeripheral> = vec![];
+        // TODO: use and iterate all services
+        // let devices = self.session.get_devices_on_adapter(&self.adapter).await?;
+        if let Some(identifiers) = options.identifiers {
+            for id in identifiers {
+                println!("Czek for {id}");
+                if let Ok(p) = self.peripheral(&id).await {
+                    let is_connected = p.is_connected().await.unwrap_or(false);
+                    let properties = p.properties().await.unwrap_or(None);
+
+                    result.push(RetrievedPeripheral {
+                        id,
+                        is_connected,
+                        is_discovered: true,
+                        properties,
+                    });
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     async fn peripheral(&self, id: &PeripheralId) -> Result<Peripheral> {

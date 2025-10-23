@@ -362,6 +362,10 @@ impl PeripheralInternal {
     }
 }
 
+struct CoreBluetoothFeatures {
+    can_send_write_without_response: bool,
+}
+
 // All of CoreBluetooth is basically async. It's all just waiting on delegate
 // events/callbacks. Therefore, we should be able to round up all of our wacky
 // ass mut *Object values, keep them in a single struct, in a single thread, and
@@ -369,7 +373,6 @@ impl PeripheralInternal {
 struct CoreBluetoothInternal {
     manager: Retained<CBCentralManager>,
     delegate: Retained<CentralDelegate>,
-    can_send_without_response_supported: bool,
     // Map of identifiers to object pointers
     peripherals: HashMap<Uuid, PeripheralInternal>,
     delegate_receiver: Fuse<Receiver<CentralDelegateEvent>>,
@@ -377,6 +380,7 @@ struct CoreBluetoothInternal {
     // task::block this when sending even though it'll never actually block.
     event_sender: Sender<CoreBluetoothEvent>,
     message_receiver: Fuse<Receiver<CoreBluetoothMessage>>,
+    features: CoreBluetoothFeatures,
 }
 
 impl Debug for CoreBluetoothInternal {
@@ -477,6 +481,16 @@ pub enum CoreBluetoothEvent {
     },
 }
 
+fn get_features() -> CoreBluetoothFeatures {
+    let process_info = NSProcessInfo::processInfo();
+    let version = process_info.operatingSystemVersion();
+    let current = (version.majorVersion, version.minorVersion);
+
+    CoreBluetoothFeatures {
+        can_send_write_without_response: current >= (11, 2),
+    }
+}
+
 impl CoreBluetoothInternal {
     pub fn new(
         message_receiver: Receiver<CoreBluetoothMessage>,
@@ -495,21 +509,15 @@ impl CoreBluetoothInternal {
             msg_send_id![CBCentralManager::alloc(), initWithDelegate: &*delegate, queue: queue]
         };
 
-        let process_info = unsafe { NSProcessInfo::processInfo() };
-        let version = unsafe { process_info.operatingSystemVersion() };
-        let mut can_send_without_response_supported = false;
-        if (version.majorVersion, version.minorVersion) >= (11, 2) {
-            can_send_without_response_supported = true;
-        }
 
         Self {
             manager,
-            can_send_without_response_supported,
             peripherals: HashMap::new(),
             delegate_receiver: receiver.fuse(),
             event_sender,
             message_receiver: message_receiver.fuse(),
             delegate,
+            features: get_features(),
         }
     }
 
@@ -895,7 +903,7 @@ impl CoreBluetoothInternal {
                     trace!("Writing value! With kind {:?}", kind);
                     unsafe {
                         if kind == WriteType::WithoutResponse
-                            && self.can_send_without_response_supported
+                            && self.features.can_send_write_without_response
                         {
                             // probably better idea would be to wait for the result of peripheral.peripheralIsReadyToSendWriteWithoutResponse
                             let mut attempts = 0;

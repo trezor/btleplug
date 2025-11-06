@@ -18,8 +18,8 @@ use super::{
 use crate::{
     api::{
         bleuuid::{uuid_from_u16, uuid_from_u32},
-        AddressType, BDAddr, CentralEvent, Characteristic, Descriptor, Peripheral as ApiPeripheral, ParseBDAddrError,
-        PeripheralProperties, Service, ValueNotification, WriteType,
+        AddressType, BDAddr, CentralEvent, Characteristic, Descriptor, ParseBDAddrError,
+        Peripheral as ApiPeripheral, PeripheralProperties, Service, ValueNotification, WriteType,
     },
     common::{adapter_manager::AdapterManager, util::notifications_stream_from_broadcast_receiver},
     Error, Result,

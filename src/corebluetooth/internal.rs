@@ -13,8 +13,8 @@ use super::{
     ffi,
     future::{BtlePlugFuture, BtlePlugFutureStateShared},
     utils::{
-        core_bluetooth::{cbuuid_to_uuid, uuid_to_cbuuid},
-        nsuuid_to_uuid,
+        core_bluetooth::{cbuuid_to_uuid, to_nsarray, uuid_to_cbuuid, uuid_to_nsuuid},
+        nsstring_to_string, nsuuid_to_uuid,
     },
 };
 use crate::api::{CharPropFlags, Characteristic, Descriptor, ScanFilter, Service, WriteType};
@@ -146,11 +146,19 @@ impl CharacteristicInternal {
 }
 
 #[derive(Clone, Debug)]
+pub struct CoreBluetoothPeripheral {
+    pub uuid: Uuid,
+    pub local_name: Option<String>,
+    // pub event_receiver: Receiver<PeripheralEventInternal>,
+}
+
+#[derive(Clone, Debug)]
 pub enum CoreBluetoothReply {
     AdapterState(CBManagerState),
     ReadResult(Vec<u8>),
     Connected(BTreeSet<Service>),
     State(CBPeripheralState),
+    Peripherals(Vec<CoreBluetoothPeripheral>),
     Ok,
     Err(String),
 }
@@ -405,6 +413,11 @@ pub enum CoreBluetoothMessage {
         filter: ScanFilter,
     },
     StopScanning,
+    /// https://developer.apple.com/documentation/corebluetooth/cbcentralmanager/retrieveperipherals(withidentifiers:)
+    RetrievePeripherals {
+        identifiers: Vec<Uuid>,
+        future: CoreBluetoothReplyStateShared,
+    },
     ConnectDevice {
         peripheral_uuid: Uuid,
         future: CoreBluetoothReplyStateShared,
@@ -585,6 +598,13 @@ impl CoreBluetoothInternal {
         }
     }
 
+    // fn add_peripheral() {
+    //     // Create our channels
+    //     let (event_sender, event_receiver) = mpsc::channel(256);
+    //     self.peripherals
+    //             .insert(uuid, PeripheralInternal::new(peripheral, event_sender));
+    // }
+
     async fn on_discovered_peripheral(
         &mut self,
         peripheral: Retained<CBPeripheral>,
@@ -597,6 +617,7 @@ impl CoreBluetoothInternal {
             .or(advertisement_name.clone());
 
         if self.peripherals.contains_key(&uuid) {
+            // log::debug!("----> on_discovered_peripheral1 {peripheral:?}");
             if local_name.is_some() {
                 self.dispatch_event(CoreBluetoothEvent::DeviceUpdated {
                     uuid,
@@ -606,10 +627,13 @@ impl CoreBluetoothInternal {
                 .await;
             }
         } else {
+            // log::debug!("----> on_discovered_peripheral2 {peripheral:?}");
             // Create our channels
             let (event_sender, event_receiver) = mpsc::channel(256);
             self.peripherals
                 .insert(uuid, PeripheralInternal::new(peripheral, event_sender));
+
+            // log::debug!("----> on_discovered_peripheral3 {:?}", self.peripherals);
             self.dispatch_event(CoreBluetoothEvent::DeviceDiscovered {
                 uuid,
                 local_name,
@@ -626,10 +650,13 @@ impl CoreBluetoothInternal {
         service_map: HashMap<Uuid, Retained<CBService>>,
     ) {
         trace!("Found services!");
+        log::debug!("----> on_discovered_services1 {:?}", peripheral_uuid);
         for id in service_map.keys() {
             trace!("{}", id);
         }
         if let Some(p) = self.peripherals.get_mut(&peripheral_uuid) {
+            log::debug!("----> on_discovered_services2 {:?}", peripheral_uuid);
+
             let services = service_map
                 .into_iter()
                 .map(|(service_uuid, cbservice)| {
@@ -1198,6 +1225,9 @@ impl CoreBluetoothInternal {
                     },
                     CoreBluetoothMessage::StartScanning{filter} => self.start_discovery(filter),
                     CoreBluetoothMessage::StopScanning => self.stop_discovery(),
+                    CoreBluetoothMessage::RetrievePeripherals{identifiers, future} => {
+                        self.retrieve_peripherals(identifiers, future).await;
+                    },
                     CoreBluetoothMessage::ConnectDevice{peripheral_uuid, future} => {
                         trace!("got connectdevice msg!");
                         self.connect_peripheral(peripheral_uuid, future);
@@ -1246,6 +1276,83 @@ impl CoreBluetoothInternal {
             .set_reply(CoreBluetoothReply::AdapterState(state))
     }
 
+    fn get_peripheral_name(
+        &mut self,
+        peripheral: Retained<CBPeripheral>,
+    ) -> (Uuid, Option<String>) {
+        let uuid = nsuuid_to_uuid(unsafe { &peripheral.identifier() });
+        let local_name: Option<String> = unsafe {
+            match peripheral.name() {
+                Some(ns_name) => nsstring_to_string(ns_name.as_ref()),
+                None => None,
+            }
+        };
+
+        // let services2 = unsafe { peripheral.discoverServices(None) };
+        // let services = unsafe { peripheral.services() };
+        // let deleg = unsafe { peripheral.delegate() };
+
+        // log::debug!("----> retrieve_peripherals service {services:?}, {services2:?}");
+
+        (uuid, local_name)
+    }
+
+    async fn retrieve_peripherals(
+        &mut self,
+        identifiers: Vec<Uuid>,
+        fut: CoreBluetoothReplyStateShared,
+    ) {
+        let mut result: Vec<CoreBluetoothPeripheral> = vec![];
+        if !identifiers.is_empty() {
+            let service_uuids = to_nsarray(
+                &vec![Uuid::parse_str("8c000001-a59b-4d58-a9ad-073df69fa1b1").unwrap()],
+                |uuid: &Uuid| uuid_to_cbuuid(*uuid),
+            );
+            let conn_peripherals = unsafe {
+                self.manager
+                    .retrieveConnectedPeripheralsWithServices(&service_uuids)
+            };
+
+            log::debug!(
+                "----> retrieveConnectedPeripheralsWithServices {:?}",
+                conn_peripherals
+            );
+
+            let ids = to_nsarray(&identifiers, uuid_to_nsuuid);
+            let peripherals = unsafe { self.manager.retrievePeripheralsWithIdentifiers(&ids) };
+
+            let result = for peripheral in peripherals.clone() {
+                let (uuid, local_name) = self.get_peripheral_name(peripheral.clone());
+                log::debug!("----> retrieve_peripherals {uuid}, {local_name:?}");
+
+                // self.on_discovered_peripheral(peripheral, None).await;
+
+                result.push(CoreBluetoothPeripheral { uuid, local_name });
+            };
+
+            // let peripherals = peripherals
+            //     .into_iter()
+            //     .map(|p| {
+            //         let (uuid, local_name) = self.get_peripheral_name(peripheral.clone());
+
+            //         CoreBluetoothPeripheral {
+            //             uuid,
+            //             local_name,
+            //         }
+            //     })
+            //     .collect::<Vec<_>>();
+        }
+
+        log::debug!(
+            "----> retrieve_peripherals-end {:?}",
+            self.peripherals.len()
+        );
+
+        fut.lock()
+            .unwrap()
+            .set_reply(CoreBluetoothReply::Peripherals(result))
+    }
+
     fn start_discovery(&mut self, filter: ScanFilter) {
         trace!("BluetoothAdapter::start_discovery");
         let service_uuids = scan_filter_to_service_uuids(filter);
@@ -1262,6 +1369,26 @@ impl CoreBluetoothInternal {
             self.manager
                 .scanForPeripheralsWithServices_options(service_uuids.as_deref(), Some(&options))
         };
+
+        // fut.lock()
+        //     .unwrap()
+        //     .set_reply(CoreBluetoothReply::Ok);
+
+        // if service_uuids.is_some() {
+        //     trace!("BluetoothAdapter::retrieveConnectedPeripheralsWithServices1");
+        //     let connected = unsafe {
+        //         self.manager.retrieveConnectedPeripheralsWithServices(service_uuids.as_deref().unwrap())
+        //     };
+        //     for peripheral in connected {
+        //         trace!("BluetoothAdapter::retrieveConnectedPeripheralsWithServices-item");
+        //         // let p = ns::array_objectatindex(connected, i);
+        //         // let peripheral = unsafe { StrongPtr::retain(p) };
+        //         self.on_discovered_peripheral(Retained::from(peripheral), None).await;
+        //     }
+        //     trace!("BluetoothAdapter::retrieveConnectedPeripheralsWithServices2");
+        // }
+
+        // trace!("BluetoothAdapter::start_discovery-done {:?}", self.peripherals);
     }
 
     fn stop_discovery(&mut self) {
@@ -1276,12 +1403,9 @@ fn scan_filter_to_service_uuids(filter: ScanFilter) -> Option<Retained<NSArray<C
     if filter.services.is_empty() {
         None
     } else {
-        let service_uuids = filter
-            .services
-            .into_iter()
-            .map(uuid_to_cbuuid)
-            .collect::<Vec<_>>();
-        Some(NSArray::from_vec(service_uuids))
+        let service_uuids = to_nsarray(&filter.services, |uuid: &Uuid| uuid_to_cbuuid(*uuid));
+
+        Some(service_uuids)
     }
 }
 

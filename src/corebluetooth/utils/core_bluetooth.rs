@@ -18,8 +18,21 @@
 
 use objc2::rc::Retained;
 use objc2_core_bluetooth::CBUUID;
-use objc2_foundation::NSString;
+use objc2_foundation::{NSArray, NSString, NSUUID};
 use uuid::Uuid;
+
+pub fn to_nsarray<T, U, F>(items: &[T], f: F) -> Retained<NSArray<U>>
+where
+    F: Fn(&T) -> Retained<U>,
+    U: objc2::Message,
+{
+    let values: Vec<Retained<U>> = items.iter().map(f).collect();
+    NSArray::from_vec(values)
+}
+
+pub fn uuid_to_nsuuid(uuid: &Uuid) -> Retained<NSUUID> {
+    NSUUID::from_bytes(uuid.into_bytes())
+}
 
 /// Convert a CBUUID object to the standard Uuid type.
 pub fn cbuuid_to_uuid(cbuuid: &CBUUID) -> Uuid {

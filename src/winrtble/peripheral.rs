@@ -18,7 +18,7 @@ use super::{
 use crate::{
     api::{
         bleuuid::{uuid_from_u16, uuid_from_u32},
-        AddressType, BDAddr, CentralEvent, Characteristic, Descriptor, Peripheral as ApiPeripheral,
+        AddressType, BDAddr, CentralEvent, Characteristic, Descriptor, Peripheral as ApiPeripheral, ParseBDAddrError,
         PeripheralProperties, Service, ValueNotification, WriteType,
     },
     common::{adapter_manager::AdapterManager, util::notifications_stream_from_broadcast_receiver},
@@ -37,6 +37,7 @@ use std::{
     convert::TryInto,
     fmt::{self, Debug, Display, Formatter},
     pin::Pin,
+    str::FromStr,
     sync::atomic::{AtomicBool, Ordering},
     sync::{Arc, RwLock},
 };
@@ -593,5 +594,13 @@ impl ApiPeripheral for Peripheral {
 impl From<BDAddr> for PeripheralId {
     fn from(address: BDAddr) -> Self {
         PeripheralId(address)
+    }
+}
+
+impl FromStr for PeripheralId {
+    type Err = ParseBDAddrError;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(PeripheralId(value.parse()?))
     }
 }

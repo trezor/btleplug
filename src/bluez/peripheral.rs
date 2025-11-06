@@ -10,10 +10,13 @@ use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "serde")]
 use serde_cr as serde;
-use std::collections::{BTreeSet, HashMap};
-use std::fmt::{self, Display, Formatter};
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::{BTreeSet, HashMap},
+    fmt::{self, Display, Formatter},
+    pin::Pin,
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
 use uuid::Uuid;
 
 use crate::api::{
@@ -338,6 +341,14 @@ impl From<MacAddress> for BDAddr {
 impl From<DeviceId> for PeripheralId {
     fn from(device_id: DeviceId) -> Self {
         PeripheralId(device_id)
+    }
+}
+
+impl FromStr for PeripheralId {
+    type Err = bluez_async::BluetoothError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(PeripheralId(DeviceId::from_str(s)?))
     }
 }
 

@@ -26,12 +26,12 @@ use objc2_core_bluetooth::CBPeripheralState;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "serde")]
 use serde_cr as serde;
-use std::sync::Weak;
 use std::{
     collections::{BTreeSet, HashMap},
     fmt::{self, Debug, Display, Formatter},
     pin::Pin,
-    sync::{Arc, Mutex},
+    str::FromStr,
+    sync::{Arc, Mutex, Weak},
 };
 use tokio::sync::broadcast;
 use tokio::task;
@@ -447,6 +447,20 @@ impl api::Peripheral for Peripheral {
 impl From<Uuid> for PeripheralId {
     fn from(uuid: Uuid) -> Self {
         PeripheralId(uuid)
+    }
+}
+
+impl FromStr for PeripheralId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(Uuid::try_parse(value).map(PeripheralId)?)
+    }
+}
+
+impl From<PeripheralId> for Uuid {
+    fn from(id: PeripheralId) -> Self {
+        id.0
     }
 }
 

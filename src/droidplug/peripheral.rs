@@ -1,7 +1,7 @@
 use crate::{
     api::{
-        self, BDAddr, Characteristic, Descriptor, PeripheralProperties, Service, ValueNotification,
-        WriteType,
+        self, BDAddr, Characteristic, Descriptor, ParseBDAddrError, PeripheralProperties, Service,
+        ValueNotification, WriteType,
     },
     Error, Result,
 };
@@ -24,6 +24,7 @@ use std::{
     convert::TryFrom,
     fmt::{self, Debug, Display, Formatter},
     pin::Pin,
+    str::FromStr,
     sync::{Arc, Mutex},
 };
 
@@ -42,6 +43,14 @@ pub struct PeripheralId(pub(super) BDAddr);
 impl Display for PeripheralId {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         Display::fmt(&self.0, f)
+    }
+}
+
+impl FromStr for PeripheralId {
+    type Err = ParseBDAddrError;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(PeripheralId(value.parse()?))
     }
 }
 

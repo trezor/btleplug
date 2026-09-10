@@ -249,6 +249,18 @@ impl Debug for PeripheralInternal {
 }
 
 impl PeripheralInternal {
+    fn require_connected(&self, fut: &CoreBluetoothReplyStateShared) -> bool {
+        if unsafe { self.peripheral.state() } != CBPeripheralState::Connected
+            || self.disconnected_future_state.is_some()
+        {
+            fut.lock().unwrap().set_reply(CoreBluetoothReply::Err(
+                "Peripheral is not connected".into(),
+            ));
+            return false;
+        }
+        true
+    }
+
     pub fn new(
         peripheral: Retained<CBPeripheral>,
         event_sender: Sender<PeripheralEventInternal>,
@@ -1163,6 +1175,9 @@ impl CoreBluetoothInternal {
             complete_missing(fut, "Peripheral");
             return;
         };
+        if !peripheral.require_connected(&fut) {
+            return;
+        }
         let Some(service) = peripheral.services.get_mut(&service_uuid) else {
             complete_missing(fut, "Service");
             return;
@@ -1213,6 +1228,9 @@ impl CoreBluetoothInternal {
     fn drain_write_without_response_queue(&mut self, peripheral_uuid: Uuid) {
         if let Some(peripheral) = self.peripherals.get_mut(&peripheral_uuid) {
             while let Some(pending) = peripheral.write_without_response_queue.pop_front() {
+                if !peripheral.require_connected(&pending.fut) {
+                    continue;
+                }
                 if !unsafe { peripheral.peripheral.canSendWriteWithoutResponse() } {
                     peripheral.write_without_response_queue.push_front(pending);
                     break;
@@ -1266,6 +1284,9 @@ impl CoreBluetoothInternal {
             complete_missing(fut, "Peripheral");
             return;
         };
+        if !peripheral.require_connected(&fut) {
+            return;
+        }
         let Some(service) = peripheral.services.get_mut(&service_uuid) else {
             complete_missing(fut, "Service");
             return;
@@ -1326,6 +1347,9 @@ impl CoreBluetoothInternal {
             complete_missing(fut, "Peripheral");
             return;
         };
+        if !peripheral.require_connected(&fut) {
+            return;
+        }
         let Some(service) = peripheral.services.get_mut(&service_uuid) else {
             complete_missing(fut, "Service");
             return;
@@ -1361,6 +1385,9 @@ impl CoreBluetoothInternal {
             complete_missing(fut, "Peripheral");
             return;
         };
+        if !peripheral.require_connected(&fut) {
+            return;
+        }
         let Some(service) = peripheral.services.get_mut(&service_uuid) else {
             complete_missing(fut, "Service");
             return;
@@ -1389,6 +1416,9 @@ impl CoreBluetoothInternal {
             complete_missing(fut, "Peripheral");
             return;
         };
+        if !peripheral.require_connected(&fut) {
+            return;
+        }
         {
             trace!("Reading RSSI!");
             unsafe {
@@ -1493,10 +1523,16 @@ impl CoreBluetoothInternal {
 
     fn discover_services(&mut self, peripheral_uuid: Uuid, fut: CoreBluetoothReplyStateShared) {
         if let Some(p) = self.peripherals.get_mut(&peripheral_uuid) {
+            if !p.require_connected(&fut) {
+                return;
+            }
+
             trace!("Discovering services!");
             p.services_discovered_future_state = Some(fut);
             // This will trigger the delegate_peripheral_diddiscoverservices in central_delegate.rs
             unsafe { p.peripheral.discoverServices(None) };
+        } else {
+            complete_missing(fut, "Peripheral");
         }
     }
 

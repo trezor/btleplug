@@ -1,3 +1,9 @@
+# 0.13.5 Unreleased
+
+## Bugfixes
+
+- Fix memory growth during long CoreBluetooth scans: the event thread kept an autorelease pool open across `.await` points. Autoreleased Objective-C objects are now drained on every poll of the event loop.
+
 # 0.13.4 (2026-10-03)
 
 ## Behavior Changes

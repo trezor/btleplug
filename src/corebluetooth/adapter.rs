@@ -138,8 +138,9 @@ impl Adapter {
                         manager_clone.emit(CentralEvent::DeviceDisconnected(uuid.into()));
                     }
                     CoreBluetoothEvent::PeripheralsCleared { future } => {
-                        manager_clone.clear_peripherals();
-                        handles.clear();
+                        manager_clone.clear_peripherals().await;
+                        // Keep handles for peripherals the manager retained (connected ones).
+                        handles.retain(|id, _| manager_clone.peripheral(id).is_some());
                         future.lock().unwrap().set_reply(CoreBluetoothReply::Ok);
                     }
                     CoreBluetoothEvent::DidUpdateState { state } => {

@@ -1766,7 +1766,10 @@ impl CoreBluetoothInternal {
                         self.retrieve_peripherals(options, future).await
                     }
                     CoreBluetoothMessage::ClearPeripherals { future } => {
-                        self.peripherals.clear();
+                        // Keep connected peripherals: they may not be advertising,
+                        // so discovery would never bring them back.
+                        self.peripherals
+                            .retain(|_, p| unsafe { p.peripheral.state() } == CBPeripheralState::Connected);
                         self.dispatch_event(CoreBluetoothEvent::PeripheralsCleared { future })
                             .await;
                     }

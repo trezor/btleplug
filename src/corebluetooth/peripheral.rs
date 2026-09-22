@@ -188,7 +188,7 @@ impl Peripheral {
                     }
                     Some(PeripheralEventInternal::Disconnected) => (),
                     None => {
-                        info!("Event receiver died, breaking out of corebluetooth device loop.");
+                        info!("OLD Event receiver died, breaking out of corebluetooth device loop.");
                         break;
                     }
                 }

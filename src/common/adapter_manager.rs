@@ -69,8 +69,20 @@ where
             .clone()
     }
 
-    pub fn clear_peripherals(&self) {
-        self.peripherals.clear();
+    /// Removes cached peripherals that are not currently connected.
+    ///
+    /// Connected peripherals are kept: they may not be advertising, so
+    /// discovery would never bring them back once dropped from the cache.
+    pub async fn clear_peripherals(&self) {
+        let mut disconnected_ids = Vec::new();
+        for entry in self.peripherals.iter() {
+            if !entry.value().is_connected().await.unwrap_or(false) {
+                disconnected_ids.push(entry.key().clone());
+            }
+        }
+        for id in disconnected_ids {
+            self.peripherals.remove(&id);
+        }
     }
 
     pub fn peripherals(&self) -> Vec<PeripheralType> {

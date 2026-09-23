@@ -27,7 +27,7 @@ use crate::api::{
 use futures::channel::mpsc::{self, Receiver, Sender};
 use futures::select;
 use futures::sink::SinkExt;
-use futures::stream::{Fuse, FusedStream, StreamExt};
+use futures::stream::{Fuse, StreamExt};
 use log::{debug, error, trace, warn};
 use objc2::{AnyThread, msg_send};
 use objc2::{
@@ -1581,9 +1581,6 @@ impl CoreBluetoothInternal {
     }
 
     async fn wait_for_message(&mut self) -> bool {
-        if self.message_receiver.is_terminated() {
-            return false;
-        }
         select! {
             delegate_msg = self.delegate_receiver.select_next_some() => {
                 match delegate_msg {
@@ -1674,7 +1671,10 @@ impl CoreBluetoothInternal {
                     },
                 };
             }
-            adapter_msg = self.message_receiver.select_next_some() => {
+            adapter_msg = self.message_receiver.next() => {
+                let Some(adapter_msg) = adapter_msg else {
+                    return false;
+                };
                 trace!("Adapter message!");
                 match adapter_msg {
                     CoreBluetoothMessage::GetAdapterState { future } => {

@@ -137,10 +137,16 @@ impl Adapter {
                         handles.remove(&uuid.into());
                         manager_clone.emit(CentralEvent::DeviceDisconnected(uuid.into()));
                     }
-                    CoreBluetoothEvent::PeripheralsCleared { future } => {
-                        manager_clone.clear_peripherals().await;
-                        // Keep handles for peripherals the manager retained (connected ones).
-                        handles.retain(|id, _| manager_clone.peripheral(id).is_some());
+                    CoreBluetoothEvent::PeripheralsCleared {
+                        retained_ids,
+                        future,
+                    } => {
+                        let retained_ids: std::collections::HashSet<PeripheralId> =
+                            retained_ids.into_iter().map(Into::into).collect();
+                        manager_clone.clear_peripherals(|peripheral| {
+                            retained_ids.contains(&peripheral.id())
+                        });
+                        handles.retain(|id, _| retained_ids.contains(id));
                         future.lock().unwrap().set_reply(CoreBluetoothReply::Ok);
                     }
                     CoreBluetoothEvent::DidUpdateState { state } => {

@@ -69,20 +69,13 @@ where
             .clone()
     }
 
-    /// Removes cached peripherals that are not currently connected.
+    /// Removes cached peripherals not retained by the backend predicate.
     ///
-    /// Connected peripherals are kept: they may not be advertising, so
-    /// discovery would never bring them back once dropped from the cache.
-    pub async fn clear_peripherals(&self) {
-        let mut disconnected_ids = Vec::new();
-        for entry in self.peripherals.iter() {
-            if !entry.value().is_connected().await.unwrap_or(false) {
-                disconnected_ids.push(entry.key().clone());
-            }
-        }
-        for id in disconnected_ids {
-            self.peripherals.remove(&id);
-        }
+    /// The backend is responsible for retaining connected and pending peripherals.
+    /// The predicate runs under the map lock and must not re-enter this manager.
+    pub fn clear_peripherals(&self, mut should_retain: impl FnMut(&PeripheralType) -> bool) {
+        self.peripherals
+            .retain(|_, peripheral| should_retain(peripheral));
     }
 
     pub fn peripherals(&self) -> Vec<PeripheralType> {

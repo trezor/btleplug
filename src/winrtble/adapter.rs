@@ -333,7 +333,8 @@ impl Central for Adapter {
     }
 
     async fn clear_peripherals(&self) -> Result<()> {
-        self.manager.clear_peripherals().await;
+        self.manager
+            .clear_peripherals(|peripheral| peripheral.should_retain());
         Ok(())
     }
 

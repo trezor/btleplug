@@ -689,6 +689,7 @@ pub enum CoreBluetoothEvent {
         uuid: Uuid,
     },
     PeripheralsCleared {
+        retained_ids: Vec<Uuid>,
         future: CoreBluetoothReplyStateShared,
     },
 }
@@ -1766,12 +1767,19 @@ impl CoreBluetoothInternal {
                         self.retrieve_peripherals(options, future).await
                     }
                     CoreBluetoothMessage::ClearPeripherals { future } => {
-                        // Keep connected peripherals: they may not be advertising,
-                        // so discovery would never bring them back.
-                        self.peripherals
-                            .retain(|_, p| unsafe { p.peripheral.state() } == CBPeripheralState::Connected);
-                        self.dispatch_event(CoreBluetoothEvent::PeripheralsCleared { future })
-                            .await;
+                        self.peripherals.retain(|_, peripheral| {
+                            peripheral.connected_future_state.is_some()
+                                || matches!(
+                                    unsafe { peripheral.peripheral.state() },
+                                    CBPeripheralState::Connected | CBPeripheralState::Connecting
+                                )
+                        });
+                        let retained_ids = self.peripherals.keys().copied().collect();
+                        self.dispatch_event(CoreBluetoothEvent::PeripheralsCleared {
+                            retained_ids,
+                            future,
+                        })
+                        .await;
                     }
                 };
             }

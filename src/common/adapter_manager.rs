@@ -69,8 +69,13 @@ where
             .clone()
     }
 
-    pub fn clear_peripherals(&self) {
-        self.peripherals.clear();
+    /// Removes cached peripherals not retained by the backend predicate.
+    ///
+    /// The backend is responsible for retaining connected and pending peripherals.
+    /// The predicate runs under the map lock and must not re-enter this manager.
+    pub fn clear_peripherals(&self, mut should_retain: impl FnMut(&PeripheralType) -> bool) {
+        self.peripherals
+            .retain(|_, peripheral| should_retain(peripheral));
     }
 
     pub fn peripherals(&self) -> Vec<PeripheralType> {

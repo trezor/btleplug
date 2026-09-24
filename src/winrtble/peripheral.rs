@@ -38,7 +38,7 @@ use std::{
     convert::TryInto,
     fmt::{self, Debug, Display, Formatter},
     pin::Pin,
-    sync::atomic::{AtomicBool, AtomicU16, Ordering},
+    sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering},
     sync::{Arc, RwLock},
 };
 use tokio::sync::broadcast;
@@ -81,6 +81,7 @@ struct Shared {
     address: BDAddr,
     mtu: AtomicU16,
     connected: AtomicBool,
+    pending_connections: AtomicUsize,
     ble_services: DashMap<Uuid, BLEService>,
     notifications_channel: broadcast::Sender<ValueNotification>,
 
@@ -96,6 +97,23 @@ struct Shared {
     latest_service_data: RwLock<HashMap<Uuid, Vec<u8>>>,
     services: RwLock<HashSet<Uuid>>,
     class: RwLock<Option<u32>>,
+}
+
+struct PendingConnection<'a> {
+    count: &'a AtomicUsize,
+}
+
+impl<'a> PendingConnection<'a> {
+    fn new(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self { count }
+    }
+}
+
+impl Drop for PendingConnection<'_> {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 struct AdvertisedName {
@@ -125,6 +143,7 @@ impl Peripheral {
                 address,
                 mtu: AtomicU16::new(api::DEFAULT_MTU_SIZE),
                 connected: AtomicBool::new(false),
+                pending_connections: AtomicUsize::new(0),
                 ble_services: DashMap::new(),
                 notifications_channel: broadcast_sender,
                 address_type: RwLock::new(None),
@@ -140,6 +159,11 @@ impl Peripheral {
                 class: RwLock::new(None),
             }),
         }
+    }
+
+    pub(crate) fn should_retain(&self) -> bool {
+        self.shared.pending_connections.load(Ordering::SeqCst) > 0
+            || self.shared.connected.load(Ordering::Relaxed)
     }
 
     // TODO: see if the other backends can also be similarly decoupled from PeripheralProperties
@@ -486,6 +510,7 @@ impl ApiPeripheral for Peripheral {
     /// Ok there has been successful connection. Note that peripherals allow only one connection at
     /// a time. Operations that attempt to communicate with a device will fail until it is connected.
     async fn connect(&self) -> Result<()> {
+        let _pending_connection = PendingConnection::new(&self.shared.pending_connections);
         let adapter_clone = self.shared.adapter.clone();
         let address = self.shared.address;
 

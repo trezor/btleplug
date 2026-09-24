@@ -11,7 +11,7 @@
 use super::{
     central_delegate::{CentralDelegate, CentralDelegateEvent},
     ffi,
-    future::{BtlePlugFuture, BtlePlugFutureStateShared},
+    future::{BtlePlugFuture, BtlePlugFutureStateShared, autoreleasepool_future},
     peripheral::Peripheral,
     utils::{
         core_bluetooth::{cbuuid_to_uuid, uuid_to_cbuuid},
@@ -29,7 +29,10 @@ use futures::sink::SinkExt;
 use futures::stream::{Fuse, StreamExt};
 use log::{debug, error, trace, warn};
 use objc2::{AnyThread, msg_send};
-use objc2::{rc::Retained, runtime::AnyObject};
+use objc2::{
+    rc::{Retained, autoreleasepool},
+    runtime::AnyObject,
+};
 use objc2_core_bluetooth::{
     CBCentralManager, CBCentralManagerScanOptionAllowDuplicatesKey, CBCharacteristic,
     CBCharacteristicProperties, CBCharacteristicWriteType, CBDescriptor, CBManager,
@@ -249,6 +252,18 @@ impl Debug for PeripheralInternal {
 }
 
 impl PeripheralInternal {
+    fn require_connected(&self, fut: &CoreBluetoothReplyStateShared) -> bool {
+        if unsafe { self.peripheral.state() } != CBPeripheralState::Connected
+            || self.disconnected_future_state.is_some()
+        {
+            fut.lock().unwrap().set_reply(CoreBluetoothReply::Err(
+                "Peripheral is not connected".into(),
+            ));
+            return false;
+        }
+        true
+    }
+
     pub fn new(
         peripheral: Retained<CBPeripheral>,
         event_sender: Sender<PeripheralEventInternal>,
@@ -674,6 +689,7 @@ pub enum CoreBluetoothEvent {
         uuid: Uuid,
     },
     PeripheralsCleared {
+        retained_ids: Vec<Uuid>,
         future: CoreBluetoothReplyStateShared,
     },
 }
@@ -688,13 +704,20 @@ impl CoreBluetoothInternal {
         let delegate = CentralDelegate::new(sender);
 
         let label = CString::new("CBqueue").unwrap();
-        let queue =
-            unsafe { ffi::dispatch_queue_create(label.as_ptr(), ffi::DISPATCH_QUEUE_SERIAL) };
-        let queue: *mut AnyObject = queue.cast();
+        let queue = unsafe {
+            let attr = ffi::dispatch_queue_attr_make_with_autorelease_frequency(
+                ffi::DISPATCH_QUEUE_SERIAL,
+                ffi::DISPATCH_AUTORELEASE_FREQUENCY_WORK_ITEM,
+            );
+            ffi::dispatch_queue_create(label.as_ptr(), attr)
+        };
 
         let manager = unsafe {
-            msg_send![CBCentralManager::alloc(), initWithDelegate: &*delegate, queue: queue]
+            let queue_object: *mut AnyObject = queue.cast();
+            msg_send![CBCentralManager::alloc(), initWithDelegate: &*delegate, queue: queue_object]
         };
+        // CBCentralManager retains its callback queue.
+        unsafe { ffi::dispatch_release(queue) };
 
         Self {
             manager,
@@ -1163,6 +1186,9 @@ impl CoreBluetoothInternal {
             complete_missing(fut, "Peripheral");
             return;
         };
+        if !peripheral.require_connected(&fut) {
+            return;
+        }
         let Some(service) = peripheral.services.get_mut(&service_uuid) else {
             complete_missing(fut, "Service");
             return;
@@ -1213,6 +1239,9 @@ impl CoreBluetoothInternal {
     fn drain_write_without_response_queue(&mut self, peripheral_uuid: Uuid) {
         if let Some(peripheral) = self.peripherals.get_mut(&peripheral_uuid) {
             while let Some(pending) = peripheral.write_without_response_queue.pop_front() {
+                if !peripheral.require_connected(&pending.fut) {
+                    continue;
+                }
                 if !unsafe { peripheral.peripheral.canSendWriteWithoutResponse() } {
                     peripheral.write_without_response_queue.push_front(pending);
                     break;
@@ -1266,6 +1295,9 @@ impl CoreBluetoothInternal {
             complete_missing(fut, "Peripheral");
             return;
         };
+        if !peripheral.require_connected(&fut) {
+            return;
+        }
         let Some(service) = peripheral.services.get_mut(&service_uuid) else {
             complete_missing(fut, "Service");
             return;
@@ -1326,6 +1358,9 @@ impl CoreBluetoothInternal {
             complete_missing(fut, "Peripheral");
             return;
         };
+        if !peripheral.require_connected(&fut) {
+            return;
+        }
         let Some(service) = peripheral.services.get_mut(&service_uuid) else {
             complete_missing(fut, "Service");
             return;
@@ -1361,6 +1396,9 @@ impl CoreBluetoothInternal {
             complete_missing(fut, "Peripheral");
             return;
         };
+        if !peripheral.require_connected(&fut) {
+            return;
+        }
         let Some(service) = peripheral.services.get_mut(&service_uuid) else {
             complete_missing(fut, "Service");
             return;
@@ -1389,6 +1427,9 @@ impl CoreBluetoothInternal {
             complete_missing(fut, "Peripheral");
             return;
         };
+        if !peripheral.require_connected(&fut) {
+            return;
+        }
         {
             trace!("Reading RSSI!");
             unsafe {
@@ -1493,10 +1534,16 @@ impl CoreBluetoothInternal {
 
     fn discover_services(&mut self, peripheral_uuid: Uuid, fut: CoreBluetoothReplyStateShared) {
         if let Some(p) = self.peripherals.get_mut(&peripheral_uuid) {
+            if !p.require_connected(&fut) {
+                return;
+            }
+
             trace!("Discovering services!");
             p.services_discovered_future_state = Some(fut);
             // This will trigger the delegate_peripheral_diddiscoverservices in central_delegate.rs
             unsafe { p.peripheral.discoverServices(None) };
+        } else {
+            complete_missing(fut, "Peripheral");
         }
     }
 
@@ -1720,9 +1767,19 @@ impl CoreBluetoothInternal {
                         self.retrieve_peripherals(options, future).await
                     }
                     CoreBluetoothMessage::ClearPeripherals { future } => {
-                        self.peripherals.clear();
-                        self.dispatch_event(CoreBluetoothEvent::PeripheralsCleared { future })
-                            .await;
+                        self.peripherals.retain(|_, peripheral| {
+                            peripheral.connected_future_state.is_some()
+                                || matches!(
+                                    unsafe { peripheral.peripheral.state() },
+                                    CBPeripheralState::Connected | CBPeripheralState::Connecting
+                                )
+                        });
+                        let retained_ids = self.peripherals.keys().copied().collect();
+                        self.dispatch_event(CoreBluetoothEvent::PeripheralsCleared {
+                            retained_ids,
+                            future,
+                        })
+                        .await;
                     }
                 };
             }
@@ -2711,7 +2768,7 @@ mod tests {
 pub fn run_corebluetooth_thread(
     event_sender: Sender<CoreBluetoothEvent>,
 ) -> Result<Sender<CoreBluetoothMessage>, Error> {
-    let authorization = unsafe { CBManager::authorization_class() };
+    let authorization = autoreleasepool(|_| unsafe { CBManager::authorization_class() });
     if authorization != CBManagerAuthorization::AllowedAlways
         && authorization != CBManagerAuthorization::NotDetermined
     {
@@ -2725,9 +2782,9 @@ pub fn run_corebluetooth_thread(
     thread::spawn(move || {
         let runtime = runtime::Builder::new_current_thread().build().unwrap();
         runtime.block_on(async move {
-            let mut cbi = CoreBluetoothInternal::new(receiver, event_sender);
+            let mut cbi = autoreleasepool(|_| CoreBluetoothInternal::new(receiver, event_sender));
             loop {
-                cbi.wait_for_message().await;
+                autoreleasepool_future(cbi.wait_for_message()).await;
             }
         })
     });

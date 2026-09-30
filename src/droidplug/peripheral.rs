@@ -182,6 +182,14 @@ impl Peripheral {
         })
     }
 
+    pub(crate) fn should_retain(&self) -> bool {
+        self.is_connected_sync().unwrap_or(false)
+    }
+
+    fn is_connected_sync(&self) -> Result<bool> {
+        self.with_obj(|env, obj| Ok(obj.is_connected(env)?))
+    }
+
     async fn set_characteristic_notification(
         &self,
         characteristic: &Characteristic,
@@ -228,7 +236,7 @@ impl api::Peripheral for Peripheral {
     }
 
     async fn is_connected(&self) -> Result<bool> {
-        self.with_obj(|env, obj| Ok(obj.is_connected(env)?))
+        self.is_connected_sync()
     }
 
     async fn connect(&self) -> Result<()> {

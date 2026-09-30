@@ -13,12 +13,19 @@
 // Copyright (c) 2014 The Rust Project Developers
 use crate::api::{CentralEvent, Peripheral};
 use crate::platform::PeripheralId;
-use dashmap::{DashMap, mapref::one::RefMut};
+use dashmap::{
+    DashMap,
+    mapref::{entry::Entry, one::RefMut},
+};
 use futures::stream::{Stream, StreamExt};
 use log::trace;
 use std::pin::Pin;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
+
+/// Matches BlueZ's default `TemporaryTimeout` for discovered devices.
+const PERIPHERAL_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub struct AdapterManager<PeripheralType>
@@ -26,6 +33,7 @@ where
     PeripheralType: Peripheral,
 {
     peripherals: DashMap<PeripheralId, PeripheralType>,
+    last_seen: DashMap<PeripheralId, Instant>,
     events_channel: broadcast::Sender<CentralEvent>,
 }
 
@@ -34,6 +42,7 @@ impl<PeripheralType: Peripheral + 'static> Default for AdapterManager<Peripheral
         let (broadcast_sender, _) = broadcast::channel(16);
         AdapterManager {
             peripherals: DashMap::new(),
+            last_seen: DashMap::new(),
             events_channel: broadcast_sender,
         }
     }
@@ -44,8 +53,17 @@ where
     PeripheralType: Peripheral + 'static,
 {
     pub fn emit(&self, event: CentralEvent) {
-        if let CentralEvent::DeviceDisconnected(ref id) = event {
-            self.peripherals.remove(id);
+        match &event {
+            CentralEvent::DeviceDisconnected(id) => {
+                self.peripherals.remove(id);
+                self.last_seen.remove(id);
+            }
+            CentralEvent::DeviceDiscovered(id)
+            | CentralEvent::DeviceUpdated(id)
+            | CentralEvent::ManufacturerDataAdvertisement { id, .. }
+            | CentralEvent::ServiceDataAdvertisement { id, .. }
+            | CentralEvent::ServicesAdvertisement { id, .. } => self.mark_seen(id),
+            _ => {}
         }
 
         if let Err(lost) = self.events_channel.send(event) {
@@ -62,15 +80,67 @@ where
     /// preserving any existing connection state and characteristics.
     pub fn add_peripheral(&self, peripheral: PeripheralType) -> PeripheralType {
         let id = peripheral.id();
-        self.peripherals
-            .entry(id)
-            .or_insert(peripheral)
-            .value()
-            .clone()
+        match self.peripherals.entry(id.clone()) {
+            Entry::Occupied(entry) => entry.get().clone(),
+            Entry::Vacant(entry) => {
+                self.last_seen.insert(id, Instant::now());
+                entry.insert(peripheral).value().clone()
+            }
+        }
     }
 
-    pub fn clear_peripherals(&self) {
-        self.peripherals.clear();
+    /// Like [`add_peripheral`](Self::add_peripheral), but for peripherals requested explicitly,
+    /// which are exempt from stale pruning.
+    pub fn add_known_peripheral(&self, peripheral: PeripheralType) -> PeripheralType {
+        let peripheral = self.add_peripheral(peripheral);
+        self.last_seen.remove(&peripheral.id());
+        peripheral
+    }
+
+    /// Removes cached peripherals not retained by the backend predicate.
+    ///
+    /// The backend is responsible for retaining connected and pending peripherals.
+    /// The predicate runs under the map lock and must not re-enter this manager.
+    pub fn clear_peripherals(&self, mut should_retain: impl FnMut(&PeripheralType) -> bool) {
+        self.peripherals
+            .retain(|_, peripheral| should_retain(peripheral));
+        self.last_seen.clear();
+    }
+
+    pub fn mark_seen(&self, id: &PeripheralId) {
+        if let Some(mut seen) = self.last_seen.get_mut(id) {
+            *seen = Instant::now();
+        }
+    }
+
+    /// Removes disconnected peripherals not seen within [`PERIPHERAL_TIMEOUT`] and returns their ids.
+    pub async fn prune_stale_peripherals(&self) -> Vec<PeripheralId> {
+        let stale: Vec<PeripheralId> = self
+            .last_seen
+            .iter()
+            .filter(|entry| entry.value().elapsed() >= PERIPHERAL_TIMEOUT)
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        let mut pruned = Vec::new();
+        for id in stale {
+            let Some(peripheral) = self.peripheral(&id) else {
+                continue;
+            };
+            // Connected peripherals stop advertising, so they must not be pruned.
+            if peripheral.is_connected().await.unwrap_or(false) {
+                self.mark_seen(&id);
+            } else if self
+                .last_seen
+                .remove_if(&id, |_, seen| seen.elapsed() >= PERIPHERAL_TIMEOUT)
+                .is_some()
+            {
+                self.peripherals.remove(&id);
+                pruned.push(id);
+            }
+        }
+
+        pruned
     }
 
     pub fn peripherals(&self) -> Vec<PeripheralType> {

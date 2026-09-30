@@ -189,21 +189,25 @@ impl Central for Adapter {
     }
 
     async fn peripherals(&self) -> Result<Vec<Peripheral>> {
+        self.manager.prune_stale_peripherals().await;
         Ok(self.manager.peripherals())
     }
 
     async fn peripheral(&self, address: &PeripheralId) -> Result<Peripheral> {
+        self.manager.prune_stale_peripherals().await;
         self.manager
             .peripheral(address)
             .ok_or(Error::DeviceNotFound)
     }
 
     async fn add_peripheral(&self, address: &PeripheralId) -> Result<Peripheral> {
-        self.add(address.0)
+        let peripheral = self.add(address.0)?;
+        Ok(self.manager.add_known_peripheral(peripheral))
     }
 
     async fn clear_peripherals(&self) -> Result<()> {
-        self.manager.clear_peripherals();
+        self.manager
+            .clear_peripherals(|peripheral| peripheral.should_retain());
         Ok(())
     }
 

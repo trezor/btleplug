@@ -560,6 +560,11 @@ pub trait Central: Send + Sync + Clone {
     /// Clears the list of [`Peripheral`]s that have been discovered so far. Connected peripherals
     /// should be disconnected before calling this method. On platforms that do not cache peripherals
     /// locally (e.g. BlueZ on Linux), this is a no-op.
+    ///
+    /// This does not stop scanning; incoming advertisements can repopulate the list.
+    /// Operating-system Bluetooth caches and objects still referenced by the caller
+    /// may remain allocated, so an immediate decrease in process memory usage is
+    /// not guaranteed.
     async fn clear_peripherals(&self) -> Result<()>;
 
     /// Get information about the Bluetooth adapter being used, such as the model or type.

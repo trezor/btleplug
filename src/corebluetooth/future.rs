@@ -3,6 +3,12 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
+pub(super) async fn autoreleasepool_future<F: Future>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    // Drain on both Pending and Ready; never keep a thread-local pool across an await.
+    std::future::poll_fn(|cx| objc2::rc::autoreleasepool(|_| future.as_mut().poll(cx))).await
+}
+
 /// Struct used for waiting on replies from the server.
 ///
 /// When a BtlePlugMessage is sent to the server, it may take an indeterminate
@@ -122,7 +128,57 @@ impl<T> Future for BtlePlugFuture<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use objc2::{AnyThread, DefinedClass, define_class, msg_send, rc::Retained};
+    use objc2_foundation::{NSObject, NSObjectProtocol};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Waker};
+
+    struct DropCounter(Arc<AtomicUsize>);
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[thread_kind = AnyThread]
+        #[ivars = DropCounter]
+        struct AutoreleaseProbe;
+
+        unsafe impl NSObjectProtocol for AutoreleaseProbe {}
+    );
+
+    fn autorelease_probe(drops: &Arc<AtomicUsize>) {
+        let allocated = AutoreleaseProbe::alloc().set_ivars(DropCounter(drops.clone()));
+        let object: Retained<AutoreleaseProbe> = unsafe { msg_send![super(allocated), init] };
+        // Transfer the sole owned reference to the currently active autorelease pool.
+        let _: *mut AutoreleaseProbe =
+            unsafe { msg_send![Retained::into_raw(object), autorelease] };
+    }
+
+    #[test]
+    fn autoreleasepool_future_drains_after_pending_and_ready() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut polls = 0;
+        let inner = std::future::poll_fn(|_| {
+            autorelease_probe(&drops);
+            polls += 1;
+            if polls == 1 {
+                Poll::Pending
+            } else {
+                Poll::Ready(42)
+            }
+        });
+        let mut future = std::pin::pin!(autoreleasepool_future(inner));
+        let mut context = Context::from_waker(Waker::noop());
+
+        assert_eq!(future.as_mut().poll(&mut context), Poll::Pending);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(future.as_mut().poll(&mut context), Poll::Ready(42));
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn late_duplicate_completion_after_poll_is_ignored() {

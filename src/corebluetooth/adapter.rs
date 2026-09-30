@@ -108,13 +108,11 @@ impl Adapter {
                                 continue;
                             };
 
-                            let peripheral = if manager_clone.peripheral(&id).is_none() {
-                                let peripheral = manager_clone.add_peripheral(peripheral);
+                            let is_new = manager_clone.peripheral(&id).is_none();
+                            let peripheral = manager_clone.add_known_peripheral(peripheral);
+                            if is_new {
                                 manager_clone.emit(CentralEvent::DeviceDiscovered(id));
-                                peripheral
-                            } else {
-                                peripheral
-                            };
+                            }
                             result.push(peripheral);
                         }
                         future
@@ -129,17 +127,44 @@ impl Adapter {
                     } => {
                         let id = uuid.into();
                         if let Some(entry) = manager_clone.peripheral_mut(&id) {
-                            entry.value().update_name(local_name, advertisement_name);
-                            manager_clone.emit(CentralEvent::DeviceUpdated(id));
+                            if local_name.is_none() && advertisement_name.is_none() {
+                                manager_clone.mark_seen(&id);
+                            } else {
+                                entry.value().update_name(local_name, advertisement_name);
+                                manager_clone.emit(CentralEvent::DeviceUpdated(id));
+                            }
                         }
                     }
                     CoreBluetoothEvent::DeviceDisconnected { uuid } => {
                         handles.remove(&uuid.into());
                         manager_clone.emit(CentralEvent::DeviceDisconnected(uuid.into()));
                     }
-                    CoreBluetoothEvent::PeripheralsCleared { future } => {
-                        manager_clone.clear_peripherals();
-                        handles.clear();
+                    CoreBluetoothEvent::PeripheralsCleared {
+                        retained_ids,
+                        future,
+                    } => {
+                        let retained_ids: std::collections::HashSet<PeripheralId> =
+                            retained_ids.into_iter().map(Into::into).collect();
+                        manager_clone.clear_peripherals(|peripheral| {
+                            retained_ids.contains(&peripheral.id())
+                        });
+                        handles.retain(|id, _| retained_ids.contains(id));
+                        future.lock().unwrap().set_reply(CoreBluetoothReply::Ok);
+                    }
+                    CoreBluetoothEvent::PeripheralsForgotten {
+                        forgotten,
+                        kept,
+                        future,
+                    } => {
+                        for uuid in forgotten {
+                            handles.remove(&uuid.into());
+                        }
+                        // Kept peripherals are mid-(dis)connect, which `is_connected()` misses.
+                        for uuid in kept {
+                            if let Some(peripheral) = handles.get(&uuid.into()) {
+                                manager_clone.add_peripheral(peripheral.clone());
+                            }
+                        }
                         future.lock().unwrap().set_reply(CoreBluetoothReply::Ok);
                     }
                     CoreBluetoothEvent::DidUpdateState { state } => {
@@ -154,6 +179,33 @@ impl Adapter {
             manager,
             sender: adapter_sender,
         })
+    }
+
+    async fn prune_stale_peripherals(&self) -> Result<()> {
+        let uuids: Vec<_> = self
+            .manager
+            .prune_stale_peripherals()
+            .await
+            .into_iter()
+            .map(|id| id.0)
+            .collect();
+        if uuids.is_empty() {
+            return Ok(());
+        }
+        let fut = CoreBluetoothReplyFuture::default();
+        self.sender
+            .to_owned()
+            .send(CoreBluetoothMessage::ForgetPeripherals {
+                uuids,
+                future: fut.get_state_clone(),
+            })
+            .await?;
+        match fut.await {
+            CoreBluetoothReply::Ok => Ok(()),
+            _ => Err(Error::RuntimeError(
+                "Unexpected CoreBluetooth forget reply".to_string(),
+            )),
+        }
     }
 }
 
@@ -182,6 +234,7 @@ impl Central for Adapter {
     }
 
     async fn peripherals(&self) -> Result<Vec<Peripheral>> {
+        self.prune_stale_peripherals().await?;
         Ok(self.manager.peripherals())
     }
 
@@ -216,6 +269,7 @@ impl Central for Adapter {
     }
 
     async fn peripheral(&self, id: &PeripheralId) -> Result<Peripheral> {
+        self.prune_stale_peripherals().await?;
         self.manager.peripheral(id).ok_or(Error::DeviceNotFound)
     }
 

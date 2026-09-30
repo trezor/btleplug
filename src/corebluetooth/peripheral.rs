@@ -43,7 +43,7 @@ use uuid::Uuid;
     serde(crate = "serde_cr")
 )]
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct PeripheralId(Uuid);
+pub struct PeripheralId(pub(crate) Uuid);
 
 impl Display for PeripheralId {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {

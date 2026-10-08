@@ -214,8 +214,8 @@ impl Central for Adapter {
                         error.to_string(),
                     )
                 })?;
-                if let Some(mut entry) = manager.peripheral_mut(&address.into()) {
-                    entry.value_mut().update_properties(args);
+                if let Some(peripheral) = manager.peripheral(&address.into()) {
+                    peripheral.update_properties(args);
                     manager.emit(CentralEvent::DeviceUpdated(address.into()));
                 } else {
                     let peripheral = Peripheral::new(Arc::downgrade(&manager), address);
@@ -235,6 +235,7 @@ impl Central for Adapter {
     }
 
     async fn peripherals(&self) -> Result<Vec<Peripheral>> {
+        self.manager.prune_stale_peripherals().await;
         Ok(self.manager.peripherals())
     }
 
@@ -276,11 +277,8 @@ impl Central for Adapter {
                 let peripheral = self
                     .manager
                     .peripheral(&PeripheralId::from(address))
-                    .unwrap_or_else(|| {
-                        let peripheral = Peripheral::new(Arc::downgrade(&self.manager), address);
-                        self.manager.add_peripheral(peripheral)
-                    });
-                result.push(peripheral);
+                    .unwrap_or_else(|| Peripheral::new(Arc::downgrade(&self.manager), address));
+                result.push(self.manager.add_known_peripheral(peripheral));
             }
             return Ok(api::merge_retrieved_peripherals(result, |peripheral| {
                 crate::api::Peripheral::id(peripheral)
@@ -360,11 +358,10 @@ impl Central for Adapter {
             if !api::matches_retrieval_selectors(&candidate_id, &service_uuids, options) {
                 return Ok(None);
             }
-            let peripheral = manager.peripheral(&candidate_id).unwrap_or_else(|| {
-                let peripheral = Peripheral::new(Arc::downgrade(manager), address);
-                manager.add_peripheral(peripheral)
-            });
-            Ok::<_, Error>(Some(peripheral))
+            let peripheral = manager
+                .peripheral(&candidate_id)
+                .unwrap_or_else(|| Peripheral::new(Arc::downgrade(manager), address));
+            Ok::<_, Error>(Some(manager.add_known_peripheral(peripheral)))
         });
 
         let mut result = Vec::new();
@@ -379,17 +376,18 @@ impl Central for Adapter {
     }
 
     async fn peripheral(&self, id: &PeripheralId) -> Result<Peripheral> {
+        self.manager.prune_stale_peripherals().await;
         self.manager.peripheral(id).ok_or(Error::DeviceNotFound)
     }
 
     async fn add_peripheral(&self, id: &PeripheralId) -> Result<Peripheral> {
         if let Some(peripheral) = self.manager.peripheral(id) {
-            return Ok(peripheral);
+            return Ok(self.manager.add_known_peripheral(peripheral));
         }
         // Create a peripheral straight from its address so a device the OS already knows (bonded or
         // connected to another central) can be reached without waiting for an advertisement.
         let peripheral = Peripheral::new(Arc::downgrade(&self.manager), id.clone().into());
-        Ok(self.manager.add_peripheral(peripheral))
+        Ok(self.manager.add_known_peripheral(peripheral))
     }
 
     async fn clear_peripherals(&self) -> Result<()> {

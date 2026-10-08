@@ -913,6 +913,20 @@ impl CoreBluetoothInternal {
         }
     }
 
+    async fn dispatch_reply_event(
+        &self,
+        event: CoreBluetoothEvent,
+        future: CoreBluetoothReplyStateShared,
+    ) {
+        let mut s = self.event_sender.clone();
+        if let Err(err) = s.send(event).await {
+            error!("Error dispatching event: {err:?}");
+            future.lock().unwrap().set_reply(CoreBluetoothReply::Err(
+                "Adapter event loop is gone".to_string(),
+            ));
+        }
+    }
+
     async fn on_manufacturer_data(
         &mut self,
         peripheral_uuid: Uuid,
@@ -1792,11 +1806,11 @@ impl CoreBluetoothInternal {
                 event_receiver,
             });
         }
-        self.dispatch_event(CoreBluetoothEvent::RetrievedPeripherals {
+        let event = CoreBluetoothEvent::RetrievedPeripherals {
             peripherals,
-            future,
-        })
-        .await;
+            future: future.clone(),
+        };
+        self.dispatch_reply_event(event, future).await;
     }
 
     async fn wait_for_message(&mut self) {
@@ -1961,16 +1975,18 @@ impl CoreBluetoothInternal {
                             p.drain_pending_operations("Peripheral cleared");
                         }
                         self.peripherals.clear();
-                        self.dispatch_event(CoreBluetoothEvent::PeripheralsCleared { future })
-                            .await;
+                        let event = CoreBluetoothEvent::PeripheralsCleared {
+                            future: future.clone(),
+                        };
+                        self.dispatch_reply_event(event, future).await;
                     }
                     CoreBluetoothMessage::ForgetPeripherals { uuids, future } => {
                         let forgotten = self.forget_peripherals(uuids);
-                        self.dispatch_event(CoreBluetoothEvent::PeripheralsForgotten {
+                        let event = CoreBluetoothEvent::PeripheralsForgotten {
                             forgotten,
-                            future,
-                        })
-                        .await;
+                            future: future.clone(),
+                        };
+                        self.dispatch_reply_event(event, future).await;
                     }
                 };
             }

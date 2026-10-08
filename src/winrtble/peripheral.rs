@@ -479,6 +479,11 @@ impl ApiPeripheral for Peripheral {
     /// Ok there has been successful connection. Note that peripherals allow only one connection at
     /// a time. Operations that attempt to communicate with a device will fail until it is connected.
     async fn connect(&self) -> Result<()> {
+        let _connection_operation = self
+            .shared
+            .adapter
+            .upgrade()
+            .map(|adapter| adapter.track_connection_operation(self.id()));
         {
             let device_guard = self.shared.device.lock().await;
             if let Some(d) = &*device_guard
@@ -540,6 +545,11 @@ impl ApiPeripheral for Peripheral {
 
     /// Terminates a connection to the device. This is a synchronous operation.
     async fn disconnect(&self) -> Result<()> {
+        let _connection_operation = self
+            .shared
+            .adapter
+            .upgrade()
+            .map(|adapter| adapter.track_connection_operation(self.id()));
         // We need to clear the services because if this device is re-connected,
         // the cached service objects will no longer be valid (they must be refreshed).
         self.shared.ble_services.clear();

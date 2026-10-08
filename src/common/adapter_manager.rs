@@ -17,6 +17,7 @@ use dashmap::{DashMap, mapref::entry::Entry};
 use futures::stream::{Stream, StreamExt};
 use log::{debug, trace};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
@@ -29,6 +30,7 @@ struct TrackedPeripheral<PeripheralType> {
     peripheral: PeripheralType,
     /// `None` exempts the peripheral from stale pruning.
     last_seen: Option<Instant>,
+    connection_operations: usize,
 }
 
 impl<PeripheralType> TrackedPeripheral<PeripheralType> {
@@ -45,6 +47,20 @@ where
 {
     peripherals: DashMap<PeripheralId, TrackedPeripheral<PeripheralType>>,
     events_channel: broadcast::Sender<CentralEvent>,
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) struct ConnectionOperationGuard<PeripheralType: Peripheral> {
+    manager: Arc<AdapterManager<PeripheralType>>,
+    id: PeripheralId,
+}
+
+impl<PeripheralType: Peripheral> Drop for ConnectionOperationGuard<PeripheralType> {
+    fn drop(&mut self) {
+        if let Some(mut tracked) = self.manager.peripherals.get_mut(&self.id) {
+            tracked.connection_operations = tracked.connection_operations.saturating_sub(1);
+        }
+    }
 }
 
 impl<PeripheralType: Peripheral + 'static> Default for AdapterManager<PeripheralType> {
@@ -98,6 +114,7 @@ where
                 .insert(TrackedPeripheral {
                     peripheral,
                     last_seen: Some(Instant::now()),
+                    connection_operations: 0,
                 })
                 .peripheral
                 .clone(),
@@ -114,6 +131,7 @@ where
                 .or_insert_with(|| TrackedPeripheral {
                     peripheral,
                     last_seen: None,
+                    connection_operations: 0,
                 });
         tracked.last_seen = None;
         tracked.peripheral.clone()
@@ -137,12 +155,27 @@ where
         }
     }
 
-    /// Returns peripherals not seen within [`PERIPHERAL_TIMEOUT`]
+    // The count lives on the entry; it is lost if the entry is removed and re-added mid-operation.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(crate) fn track_connection_operation(
+        self: &Arc<Self>,
+        id: PeripheralId,
+    ) -> ConnectionOperationGuard<PeripheralType> {
+        if let Some(mut tracked) = self.peripherals.get_mut(&id) {
+            tracked.connection_operations += 1;
+        }
+        ConnectionOperationGuard {
+            manager: self.clone(),
+            id,
+        }
+    }
+
+    /// Returns peripherals not seen within [`PERIPHERAL_TIMEOUT`] and not mid-connect/disconnect,
     /// regardless of their connection state.
     pub fn expired_peripherals(&self) -> Vec<PeripheralId> {
         self.peripherals
             .iter()
-            .filter(|entry| entry.is_stale())
+            .filter(|entry| entry.is_stale() && entry.connection_operations == 0)
             .map(|entry| entry.key().clone())
             .collect()
     }
@@ -161,7 +194,7 @@ where
                     if self
                         .peripherals
                         .remove_if(&id, |_, tracked| {
-                            tracked.is_stale()
+                            tracked.is_stale() && tracked.connection_operations == 0
                         })
                         .is_some()
                     {
@@ -354,6 +387,25 @@ mod tests {
             assert!(Arc::ptr_eq(&stored.state, &peripheral.state));
             assert_eq!(peripheral.state.load(Ordering::SeqCst), WORKERS);
         }
+    }
+
+    #[tokio::test]
+    async fn pruning_keeps_peripheral_during_connection_operation() {
+        let manager = Arc::new(AdapterManager::default());
+        let peripheral = TestPeripheral::new();
+        let id = peripheral.id();
+        manager.add_peripheral(peripheral);
+        expire(&manager, &id);
+        let operation = manager.track_connection_operation(id.clone());
+
+        assert!(manager.prune_stale_peripherals().await.is_empty());
+        assert!(manager.peripheral(&id).is_some());
+
+        drop(operation);
+        assert_eq!(
+            manager.peripherals.get(&id).unwrap().connection_operations,
+            0
+        );
     }
 
     #[tokio::test]

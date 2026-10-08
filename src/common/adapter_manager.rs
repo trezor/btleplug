@@ -13,19 +13,37 @@
 // Copyright (c) 2014 The Rust Project Developers
 use crate::api::{CentralEvent, Peripheral};
 use crate::platform::PeripheralId;
-use dashmap::{DashMap, mapref::one::RefMut};
+use dashmap::{DashMap, mapref::entry::Entry};
 use futures::stream::{Stream, StreamExt};
-use log::trace;
+use log::{debug, trace};
 use std::pin::Pin;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
+
+/// Matches BlueZ's default `TemporaryTimeout` for discovered devices.
+const PERIPHERAL_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug)]
+struct TrackedPeripheral<PeripheralType> {
+    peripheral: PeripheralType,
+    /// `None` exempts the peripheral from stale pruning.
+    last_seen: Option<Instant>,
+}
+
+impl<PeripheralType> TrackedPeripheral<PeripheralType> {
+    fn is_stale(&self) -> bool {
+        self.last_seen
+            .is_some_and(|seen| seen.elapsed() >= PERIPHERAL_TIMEOUT)
+    }
+}
 
 #[derive(Debug)]
 pub struct AdapterManager<PeripheralType>
 where
     PeripheralType: Peripheral,
 {
-    peripherals: DashMap<PeripheralId, PeripheralType>,
+    peripherals: DashMap<PeripheralId, TrackedPeripheral<PeripheralType>>,
     events_channel: broadcast::Sender<CentralEvent>,
 }
 
@@ -44,8 +62,21 @@ where
     PeripheralType: Peripheral + 'static,
 {
     pub fn emit(&self, event: CentralEvent) {
-        if let CentralEvent::DeviceDisconnected(ref id) = event {
-            self.peripherals.remove(id);
+        match &event {
+            CentralEvent::DeviceDisconnected(id) => {
+                self.peripherals.remove(id);
+            }
+            CentralEvent::DeviceConnected(id) => {
+                if let Some(mut tracked) = self.peripherals.get_mut(id) {
+                    tracked.last_seen = None;
+                }
+            }
+            CentralEvent::DeviceDiscovered(id)
+            | CentralEvent::DeviceUpdated(id)
+            | CentralEvent::ManufacturerDataAdvertisement { id, .. }
+            | CentralEvent::ServiceDataAdvertisement { id, .. }
+            | CentralEvent::ServicesAdvertisement { id, .. } => self.mark_seen(id),
+            _ => {}
         }
 
         if let Err(lost) = self.events_channel.send(event) {
@@ -61,47 +92,112 @@ where
     /// Inserts a peripheral if absent and returns the retained instance,
     /// preserving any existing connection state and characteristics.
     pub fn add_peripheral(&self, peripheral: PeripheralType) -> PeripheralType {
-        let id = peripheral.id();
-        self.peripherals
-            .entry(id)
-            .or_insert(peripheral)
-            .value()
-            .clone()
+        match self.peripherals.entry(peripheral.id()) {
+            Entry::Occupied(entry) => entry.get().peripheral.clone(),
+            Entry::Vacant(entry) => entry
+                .insert(TrackedPeripheral {
+                    peripheral,
+                    last_seen: Some(Instant::now()),
+                })
+                .peripheral
+                .clone(),
+        }
+    }
+
+    /// Like [`add_peripheral`](Self::add_peripheral), but for peripherals requested explicitly,
+    /// which are exempt from stale pruning.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    pub fn add_known_peripheral(&self, peripheral: PeripheralType) -> PeripheralType {
+        let mut tracked =
+            self.peripherals
+                .entry(peripheral.id())
+                .or_insert_with(|| TrackedPeripheral {
+                    peripheral,
+                    last_seen: None,
+                });
+        tracked.last_seen = None;
+        tracked.peripheral.clone()
     }
 
     pub fn clear_peripherals(&self) {
         self.peripherals.clear();
     }
 
-    pub fn peripherals(&self) -> Vec<PeripheralType> {
+    /// Removes a peripheral without emitting an event.
+    #[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
+    pub fn remove_peripheral(&self, id: &PeripheralId) {
+        self.peripherals.remove(id);
+    }
+
+    pub fn mark_seen(&self, id: &PeripheralId) {
+        if let Some(mut tracked) = self.peripherals.get_mut(id)
+            && let Some(seen) = &mut tracked.last_seen
+        {
+            *seen = Instant::now();
+        }
+    }
+
+    /// Returns peripherals not seen within [`PERIPHERAL_TIMEOUT`]
+    /// regardless of their connection state.
+    pub fn expired_peripherals(&self) -> Vec<PeripheralId> {
         self.peripherals
             .iter()
-            .map(|val| val.value().clone())
+            .filter(|entry| entry.is_stale())
+            .map(|entry| entry.key().clone())
             .collect()
     }
 
-    // Only used on windows and macOS/iOS, so turn off deadcode so we don't get warnings on android/linux.
-    #[allow(dead_code)]
-    pub fn peripheral_mut(
-        &self,
-        id: &PeripheralId,
-    ) -> Option<RefMut<'_, PeripheralId, PeripheralType>> {
-        self.peripherals.get_mut(id)
+    /// Removes disconnected expired peripherals and returns their ids.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub async fn prune_stale_peripherals(&self) -> Vec<PeripheralId> {
+        let mut pruned = Vec::new();
+        for id in self.expired_peripherals() {
+            let Some(peripheral) = self.peripheral(&id) else {
+                continue;
+            };
+            // Connected peripherals stop advertising, so they must not be pruned.
+            match peripheral.is_connected().await {
+                Ok(false) => {
+                    if self
+                        .peripherals
+                        .remove_if(&id, |_, tracked| {
+                            tracked.is_stale()
+                        })
+                        .is_some()
+                    {
+                        pruned.push(id);
+                    }
+                }
+                Ok(true) => self.mark_seen(&id),
+                Err(error) => {
+                    debug!("Keeping {id:?}, connection state unknown: {error}");
+                    self.mark_seen(&id);
+                }
+            }
+        }
+        pruned
+    }
+
+    pub fn peripherals(&self) -> Vec<PeripheralType> {
+        self.peripherals
+            .iter()
+            .map(|val| val.peripheral.clone())
+            .collect()
     }
 
     pub fn peripheral(&self, id: &PeripheralId) -> Option<PeripheralType> {
-        self.peripherals.get(id).map(|val| val.value().clone())
+        self.peripherals.get(id).map(|val| val.peripheral.clone())
     }
 }
 
 #[cfg(all(test, any(target_vendor = "apple", target_os = "windows")))]
 mod tests {
     use super::*;
-    use crate::Result;
     use crate::api::{
         BDAddr, Characteristic, Descriptor, PeripheralProperties, Service, ValueNotification,
         WriteType,
     };
+    use crate::{Error, Result};
     use async_trait::async_trait;
     use std::collections::BTreeSet;
     use std::sync::{
@@ -113,6 +209,8 @@ mod tests {
     struct TestPeripheral {
         id: PeripheralId,
         state: Arc<AtomicUsize>,
+        // `None` makes `is_connected` fail.
+        connected: Option<bool>,
     }
 
     impl TestPeripheral {
@@ -124,8 +222,14 @@ mod tests {
             Self {
                 id,
                 state: Arc::new(AtomicUsize::new(0)),
+                connected: Some(false),
             }
         }
+    }
+
+    fn expire(manager: &AdapterManager<TestPeripheral>, id: &PeripheralId) {
+        manager.peripherals.get_mut(id).unwrap().last_seen =
+            Some(Instant::now() - PERIPHERAL_TIMEOUT);
     }
 
     #[async_trait]
@@ -151,7 +255,8 @@ mod tests {
         }
 
         async fn is_connected(&self) -> Result<bool> {
-            unreachable!()
+            self.connected
+                .ok_or_else(|| Error::RuntimeError("unknown connection state".to_string()))
         }
 
         async fn connect(&self) -> Result<()> {
@@ -249,5 +354,84 @@ mod tests {
             assert!(Arc::ptr_eq(&stored.state, &peripheral.state));
             assert_eq!(peripheral.state.load(Ordering::SeqCst), WORKERS);
         }
+    }
+
+    #[tokio::test]
+    async fn pruning_removes_stale_disconnected_peripheral() {
+        let manager = AdapterManager::default();
+        let id = manager.add_peripheral(TestPeripheral::new()).id();
+        expire(&manager, &id);
+
+        assert_eq!(manager.prune_stale_peripherals().await, vec![id.clone()]);
+        assert!(manager.peripheral(&id).is_none());
+        assert!(!manager.peripherals.contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn pruning_keeps_known_peripheral() {
+        let manager = AdapterManager::default();
+        let id = manager.add_peripheral(TestPeripheral::new()).id();
+        expire(&manager, &id);
+        manager.add_known_peripheral(TestPeripheral::new());
+
+        assert!(manager.prune_stale_peripherals().await.is_empty());
+        assert!(manager.peripheral(&id).is_some());
+    }
+
+    #[test]
+    fn mark_seen_keeps_known_peripheral_exempt() {
+        let manager = AdapterManager::default();
+        let id = manager.add_known_peripheral(TestPeripheral::new()).id();
+        manager.mark_seen(&id);
+
+        assert!(manager.peripherals.get(&id).unwrap().last_seen.is_none());
+    }
+
+    #[tokio::test]
+    async fn mark_seen_resets_stale_timer() {
+        let manager = AdapterManager::default();
+        let id = manager.add_peripheral(TestPeripheral::new()).id();
+        expire(&manager, &id);
+        manager.mark_seen(&id);
+
+        assert!(manager.prune_stale_peripherals().await.is_empty());
+        assert!(manager.peripheral(&id).is_some());
+    }
+
+    #[tokio::test]
+    async fn pruning_keeps_peripheral_with_unknown_connection_state() {
+        let manager = AdapterManager::default();
+        let mut peripheral = TestPeripheral::new();
+        peripheral.connected = None;
+        let id = manager.add_peripheral(peripheral).id();
+        expire(&manager, &id);
+
+        assert!(manager.prune_stale_peripherals().await.is_empty());
+        assert!(manager.peripheral(&id).is_some());
+        assert!(!manager.peripherals.get(&id).unwrap().is_stale());
+    }
+
+    #[tokio::test]
+    async fn pruning_keeps_connected_peripheral() {
+        let manager = AdapterManager::default();
+        let mut peripheral = TestPeripheral::new();
+        peripheral.connected = Some(true);
+        let id = manager.add_peripheral(peripheral).id();
+        expire(&manager, &id);
+
+        assert!(manager.prune_stale_peripherals().await.is_empty());
+        assert!(manager.peripheral(&id).is_some());
+        assert!(!manager.peripherals.get(&id).unwrap().is_stale());
+    }
+
+    #[tokio::test]
+    async fn device_connected_exempts_peripheral_from_pruning() {
+        let manager = AdapterManager::default();
+        let id = manager.add_peripheral(TestPeripheral::new()).id();
+        expire(&manager, &id);
+        manager.emit(CentralEvent::DeviceConnected(id.clone()));
+
+        assert!(manager.prune_stale_peripherals().await.is_empty());
+        assert!(manager.peripherals.get(&id).unwrap().last_seen.is_none());
     }
 }

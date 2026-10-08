@@ -1,5 +1,23 @@
 # 0.13.5 Unreleased
 
+## Behavior Changes
+
+- **Stale peripherals are pruned on CoreBluetooth and Windows**:
+  `Central::peripherals()` and `Central::peripheral()` no longer return
+  disconnected peripherals that have not advertised for 30 seconds, matching
+  BlueZ's default `TemporaryTimeout`. Connected peripherals and peripherals
+  returned by `retrieve_peripherals()` or `add_peripheral()` are exempt until
+  they disconnect. A pruned peripheral reappears, with a new
+  `DeviceDiscovered`, when it advertises during a scan. Without scanning,
+  re-obtain it with `retrieve_peripherals()` using an identifier selector on
+  CoreBluetooth, or with `add_peripheral()` on Windows. No `CentralEvent` is
+  emitted for pruned peripherals, so event-stream consumers should reconcile
+  with `peripherals()`. On CoreBluetooth, `Peripheral` handles of a pruned
+  peripheral stop working (pending operations fail with "Peripheral no longer
+  available"); fetch a fresh handle after rediscovery. BlueZ and Android are
+  unaffected. Known limitation: on CoreBluetooth a `retrieve_peripherals()`
+  call racing a prune may need to be repeated.
+
 ## Bugfixes
 
 - Fix memory growth during long CoreBluetooth scans: the event thread kept an autorelease pool open across `.await` points. Autoreleased Objective-C objects are now drained on every poll of the event loop.

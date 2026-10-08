@@ -534,6 +534,9 @@ pub trait Central: Send + Sync + Clone {
 
     /// Returns the list of [`Peripheral`]s that have been discovered so far. Note that this list
     /// may contain peripherals that are no longer available.
+    /// On CoreBluetooth and WinRT, disconnected peripherals that have not advertised for 30s. are
+    /// removed, unless explicitly returned by `retrieve_peripherals()` or `add_peripheral()`.
+    /// On CoreBluetooth, all handles to a removed peripheral stops working.
     async fn peripherals(&self) -> Result<Vec<Self::Peripheral>>;
 
     /// Retrieves peripherals from the backend's connected-device or known-device source.
@@ -553,6 +556,7 @@ pub trait Central: Send + Sync + Clone {
     }
 
     /// Returns a particular [`Peripheral`] by its address if it has been discovered.
+    /// Subject to the same stale-peripheral removal as [`Central::peripherals`].
     async fn peripheral(&self, id: &PeripheralId) -> Result<Self::Peripheral>;
 
     /// Add a [`Peripheral`] from a MAC address without a scan result. Not supported on all Bluetooth systems.

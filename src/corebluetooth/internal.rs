@@ -821,6 +821,10 @@ pub enum CoreBluetoothMessage {
     ClearPeripherals {
         future: CoreBluetoothReplyStateShared,
     },
+    ForgetPeripherals {
+        uuids: Vec<Uuid>,
+        future: CoreBluetoothReplyStateShared,
+    },
 }
 
 #[derive(Debug)]
@@ -851,10 +855,17 @@ pub enum CoreBluetoothEvent {
         local_name: Option<String>,
         advertisement_name: Option<String>,
     },
+    DeviceSeen {
+        uuid: Uuid,
+    },
     DeviceDisconnected {
         uuid: Uuid,
     },
     PeripheralsCleared {
+        future: CoreBluetoothReplyStateShared,
+    },
+    PeripheralsForgotten {
+        forgotten: Vec<Uuid>,
         future: CoreBluetoothReplyStateShared,
     },
 }
@@ -1027,15 +1038,16 @@ impl CoreBluetoothInternal {
                 event_receiver,
             })
             .await;
-        } else {
-            if local_name.is_some() || advertisement_name.is_some() {
-                self.dispatch_event(CoreBluetoothEvent::DeviceUpdated {
-                    uuid,
-                    local_name,
-                    advertisement_name,
-                })
+        } else if local_name.is_none() && advertisement_name.is_none() {
+            self.dispatch_event(CoreBluetoothEvent::DeviceSeen { uuid })
                 .await;
-            }
+        } else {
+            self.dispatch_event(CoreBluetoothEvent::DeviceUpdated {
+                uuid,
+                local_name,
+                advertisement_name,
+            })
+            .await;
         }
     }
 
@@ -1338,6 +1350,24 @@ impl CoreBluetoothInternal {
                 .unwrap()
                 .set_reply(CoreBluetoothReply::State(CBPeripheralState::Disconnected));
         }
+    }
+
+    /// Forgets the given peripherals unless they are connected, connecting or disconnecting.
+    /// Returns the forgotten ones.
+    fn forget_peripherals(&mut self, uuids: Vec<Uuid>) -> Vec<Uuid> {
+        let mut forgotten = Vec::with_capacity(uuids.len());
+        for uuid in uuids {
+            if let Some(p) = self.peripherals.get(&uuid)
+                && unsafe { p.peripheral.state() } != CBPeripheralState::Disconnected
+            {
+                continue;
+            }
+            if let Some(mut p) = self.peripherals.remove(&uuid) {
+                p.drain_pending_operations("Peripheral no longer available");
+            }
+            forgotten.push(uuid);
+        }
+        forgotten
     }
 
     fn write_value(
@@ -1933,6 +1963,14 @@ impl CoreBluetoothInternal {
                         self.peripherals.clear();
                         self.dispatch_event(CoreBluetoothEvent::PeripheralsCleared { future })
                             .await;
+                    }
+                    CoreBluetoothMessage::ForgetPeripherals { uuids, future } => {
+                        let forgotten = self.forget_peripherals(uuids);
+                        self.dispatch_event(CoreBluetoothEvent::PeripheralsForgotten {
+                            forgotten,
+                            future,
+                        })
+                        .await;
                     }
                 };
             }

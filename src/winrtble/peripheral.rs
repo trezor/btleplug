@@ -181,8 +181,7 @@ impl Peripheral {
         if let Ok(manufacturer_data) = advertisement.ManufacturerData()
             && manufacturer_data.Size().unwrap() > 0
         {
-            let mut manufacturer_data_guard = self.shared.latest_manufacturer_data.write().unwrap();
-            *manufacturer_data_guard = manufacturer_data
+            let manufacturer_data: HashMap<u16, Vec<u8>> = manufacturer_data
                 .into_iter()
                 .map(|d| {
                     let manufacturer_id = d.CompanyId().unwrap();
@@ -191,11 +190,12 @@ impl Peripheral {
                     (manufacturer_id, data)
                 })
                 .collect();
+            *self.shared.latest_manufacturer_data.write().unwrap() = manufacturer_data.clone();
 
             // Emit event of newly received advertisement
             self.emit_event(CentralEvent::ManufacturerDataAdvertisement {
                 id: self.shared.address.into(),
-                manufacturer_data: manufacturer_data_guard.clone(),
+                manufacturer_data,
             });
         }
 
@@ -264,9 +264,7 @@ impl Peripheral {
             }
 
             if found_service_data {
-                let mut service_data_guard = self.shared.latest_service_data.write().unwrap();
-
-                *service_data_guard = data_sections
+                let service_data: HashMap<Uuid, Vec<u8>> = data_sections
                     .into_iter()
                     .filter_map(|d| {
                         let data = utils::to_vec(&d.Data().ok()?);
@@ -274,11 +272,12 @@ impl Peripheral {
                         parse_service_data(data_type, &data)
                     })
                     .collect();
+                *self.shared.latest_service_data.write().unwrap() = service_data.clone();
 
                 // Emit event of newly received advertisement
                 self.emit_event(CentralEvent::ServiceDataAdvertisement {
                     id: self.shared.address.into(),
-                    service_data: service_data_guard.clone(),
+                    service_data,
                 });
             }
         }
@@ -311,10 +310,12 @@ impl Peripheral {
                 for uuid in services {
                     services_guard.insert(utils::to_uuid(&uuid));
                 }
+                let services = services_guard.iter().copied().collect();
+                drop(services_guard);
 
                 self.emit_event(CentralEvent::ServicesAdvertisement {
                     id: self.shared.address.into(),
-                    services: services_guard.iter().copied().collect(),
+                    services,
                 });
             }
         }
